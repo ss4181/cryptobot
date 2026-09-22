@@ -132,7 +132,7 @@ jobs:
           set -u
           CANDIDATES="https://data-api.binance.vision https://api.binance.us https://api1.binance.com https://api.binance.com"
           for base in $CANDIDATES; do
-            code="$(curl -s -o /dev/null -w '%%{http_code}' --max-time 20 "$base/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=1" || true)"
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$base/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=1" || true)"
             echo "probe $base -> HTTP ${code}"
             if [ "$code" = "200" ]; then
               echo "selected market-data endpoint: $base"

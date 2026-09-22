@@ -94,6 +94,10 @@ env:
   DURATION_SECONDS: ${{ github.event.inputs.duration_seconds || '300' }}
   INTERVAL_SECONDS: ${{ github.event.inputs.interval_seconds || '60' }}
   DAYS: ${{ github.event.inputs.days || '30' }}
+  # Hour (UTC, 0-23) of the ONE run per day that is allowed to push a phone
+  # notification.  Every other run stays silent.  Set CRYPTOBOT_NOTIFY_HOUR_UTC
+  # to `off` to disable phone notifications completely.
+  NOTIFY_HOUR_UTC: ${{ vars.CRYPTOBOT_NOTIFY_HOUR_UTC || '6' }}
 
 jobs:
   paper:
@@ -161,6 +165,33 @@ jobs:
           restore-keys: |
             cryptobot-state-
 
+      - name: Notification throttle (at most one message per day)
+        # Every cold run replays the cached history and would otherwise push a
+        # burst of trade notifications every 30 minutes.  Only the run whose UTC
+        # hour matches NOTIFY_HOUR_UTC is allowed to push, and that one run is
+        # capped to a single message (the daily summary).
+        run: |
+          set -u
+          HOUR="$(date -u +%H)"
+          TARGET="$(printf '%s' "${NOTIFY_HOUR_UTC}" | tr -d '[:space:]')"
+          echo "UTC hour now: ${HOUR} | notify hour: ${TARGET}"
+          case "${TARGET}" in
+            off|none|no|-1|"")
+              echo "CRYPTOBOT_NOTIFY_ENABLED=0" >> "$GITHUB_ENV"
+              echo "notifications disabled by configuration"
+              exit 0
+              ;;
+          esac
+          NORM="$(printf '%02d' "${TARGET}" 2>/dev/null || printf '%s' "${TARGET}")"
+          if [ "${HOUR}" = "${NORM}" ]; then
+            echo "CRYPTOBOT_NOTIFY_ENABLED=1" >> "$GITHUB_ENV"
+            echo "CRYPTOBOT_NOTIFY_ON=daily_summary" >> "$GITHUB_ENV"
+            echo "CRYPTOBOT_NOTIFY_MAX_PER_HOUR=1" >> "$GITHUB_ENV"
+            echo "daily notification run: at most ONE push will be sent"
+          else
+            echo "CRYPTOBOT_NOTIFY_ENABLED=0" >> "$GITHUB_ENV"
+            echo "not a notification run: pushes disabled"
+          fi
       - name: Paper run -- bounded live window
         # Real-time mode: the loop refreshes the cache from the public endpoint
         # and stops on its own after DURATION_SECONDS (no --offline, no --replay).

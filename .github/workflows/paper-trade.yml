@@ -124,6 +124,23 @@ jobs:
       - name: Unit tests (offline, no network)
         run: python -m unittest discover -s cryptobot/tests -t .
 
+      - name: Resolve reachable market-data endpoint
+        # GitHub-hosted runners sit on US IPs and api.binance.com answers HTTP
+        # 451 (unavailable for legal reasons) there.  Probe the whitelisted
+        # Binance hosts and pin the first reachable one for every later step.
+        run: |
+          set -u
+          CANDIDATES="https://data-api.binance.vision https://api.binance.us https://api1.binance.com https://api.binance.com"
+          for base in $CANDIDATES; do
+            code="$(curl -s -o /dev/null -w '%%{http_code}' --max-time 20 "$base/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=1" || true)"
+            echo "probe $base -> HTTP ${code}"
+            if [ "$code" = "200" ]; then
+              echo "selected market-data endpoint: $base"
+              echo "CRYPTOBOT_API_BASE=$base" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo "::warning::No whitelisted Binance endpoint answered HTTP 200; the download step will report the failure."
       - name: Download fresh public candles (no key needed)
         # A cold runner has no data/cache, so this MUST run before the paper loop.
         run: python -m cryptobot download --timeframe "$TIMEFRAME" --days "$DAYS"

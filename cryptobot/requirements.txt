@@ -1,0 +1,10 @@
+# cryptobot -- paper trading (simulation only). No exchange API keys are ever needed.
+# Versions listed are the ones this repository was developed and verified against.
+numpy>=2.0
+pandas>=2.2
+matplotlib>=3.8
+requests>=2.31
+PyYAML>=6.0
+# Optional: only used as a fallback transport in data/feed.py (CcxtTransport).
+# The default transport is plain public REST via requests and needs no extra package.
+ccxt>=4.4

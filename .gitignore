@@ -1,0 +1,22 @@
+# =============================================================================
+#  Opt-in repository root -- ignore EVERYTHING here, then re-include only the
+#  paths the cloud bot actually needs.
+#
+#  Why opt-in: this folder is also a local working directory (scratch runs,
+#  logs, editor/tool state).  A denylist would leak that content into the
+#  repository; an allowlist cannot.
+#
+#  cryptobot/ is re-included as a whole, so cryptobot/.gitignore stays in force
+#  for the runtime state INSIDE the package (data/ledger.sqlite, logs/*.jsonl,
+#  run/ scratch, __pycache__, ...).
+# =============================================================================
+/*
+
+# --- the only paths that get committed ---------------------------------------
+!/.gitignore
+!/.github/
+!/README.md
+!/DEPLOY.md
+!/cryptobot/
+# -----------------------------------------------------------------------------
+!/.gitattributes

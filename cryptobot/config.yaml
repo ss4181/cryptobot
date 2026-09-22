@@ -1,0 +1,167 @@
+# =============================================================================
+#  cryptobot -- paper trading config (SIMULATION ONLY)
+#  Live trading is impossible: mode accepts only "paper" or "backtest".
+#  Every value below can be overridden by an env var (CRYPTOBOT_*) or a CLI flag.
+# =============================================================================
+
+# paper = simulated live loop | backtest = historical replay. Live is not implemented.
+mode: paper
+
+# --- capital -----------------------------------------------------------------
+initial_capital_usdt: 50.0
+
+# --- profit / loss targets ---------------------------------------------------
+# Net target AFTER fees and slippage. The gross TP level is derived from this
+# value by cryptobot.execution.costs.required_gross_tp_pct().
+net_profit_target_pct: 2.0
+# Optional override of the derived gross TP in percent (null = derive from net target).
+gross_take_profit_pct: null
+# Stop-loss measured on the reference price below the entry fill price.
+stop_loss_pct: 2.5
+
+# --- position / portfolio limits --------------------------------------------
+# Which limits do what:
+#   block NEW entries : daily_loss_limit_pct, cooldown_minutes, max_open_positions,
+#                       max_trades_per_day, min_equity_usdt, below_min_notional,
+#                       and the data fail-safe (pause_new_entries on stale/incomplete data)
+#   size only         : max_position_pct (never blocks an entry, only shrinks it)
+#   close only        : stop_loss_pct / take-profit (manage open positions; do not block entries)
+max_position_pct: 90.0        # max share of equity committed to one position (sizing only)
+max_open_positions: 1         # simultaneous open positions
+daily_loss_limit_pct: 5.0     # halts new entries for the rest of the UTC day
+cooldown_minutes: 60          # no new entry for N minutes after a losing trade
+min_equity_usdt: 10.0         # refuse new entries below this equity
+# Hard cap on NEW ENTRIES per UTC day. Closes do not consume this budget, so
+# `8` genuinely means 8 entries (roll_day resets the counter at the UTC boundary).
+max_trades_per_day: 8
+
+# --- market ------------------------------------------------------------------
+pairs:
+  - BTC/USDT
+  - ETH/USDT
+timeframe: 1h
+
+# --- costs (keep realistic; they dominate small-account results) -------------
+fee_pct: 0.1                  # taker fee in percent per side
+slippage_pct: 0.05            # one-sided slippage in percent
+
+# --- strategy ----------------------------------------------------------------
+strategy:
+  name: mean_reversion
+  params:
+    bb_period: 20             # Bollinger lookback
+    bb_std: 2.0               # band width in std-devs
+    rsi_period: 14
+    rsi_oversold: 35          # only buy when RSI is at/below this
+    trend_sma_period: 200     # only buy when close > this SMA
+    exit_at_middle_band: true # take the mean-reversion exit at the middle band
+
+# --- data feed (public REST, no key) ----------------------------------------
+data:
+  api_base: https://api.binance.com
+  history_days: 180
+  request_timeout_seconds: 20
+  max_retries: 5
+  backoff_initial_seconds: 1.0
+  backoff_max_seconds: 30.0
+  cache_dir: data/cache
+  db_path: data/ledger.sqlite   # tum paper/backtest kayitlari (SQLite)
+  # REAL-TIME PAPER MODE ONLY. If the newest cached candle is older than this many
+  # bars, the cache is treated as stale: it is refreshed from the exchange, and if
+  # the exchange is unreachable the result is `cache-stale` / complete=False and the
+  # engine pauses new entries (fail-safe). Backtest and --replay ignore this bound:
+  # they intentionally run on old historical candles.
+  max_cache_age_bars: 3
+
+# --- cikti klasoru (raporlar) ---
+reports_dir: reports
+
+# --- logging -----------------------------------------------------------------
+logging:
+  level: INFO
+  dir: logs
+
+# =============================================================================
+#  BILDIRIMLER (telefon/mobil uyari katmani) -- opsiyonel, guvenli varsayilan
+#  ---------------------------------------------------------------------------
+#  Bu katman SADECE mesaj gonderir; hicbir emir yolu yoktur ve islem kararlarini
+#  ETKILEMEZ. Bir saglayici coksse bile paper dongusu durmaz (hatalari yutar).
+#
+#  Gizli degerler (erisim jetonu, konu adi, telegram bilgileri, webhook adresi)
+#  ASLA bu dosyaya yazilmaz; yalnizca ortam degiskenlerinden okunur.
+#  Kurulum: NOTIFICATIONS.md | Hazir sablon: .env.example
+#
+#  Mesajlar bolumlu/emoji baslikli gonderilir; ntfy'ye "Markdown: yes" basligi
+#  eklenir, Telegram HTML (<b>) alir, webhook/console/file duz metin alir.
+#  Bicimi gormek icin:  notify preview --all
+# =============================================================================
+notifications:
+  # Ana anahtar. false yaparsaniz hicbir bildirim uretilmez/denenmez.
+  enabled: true
+
+  # Kullanilacak saglayicilar. console+file her zaman calisir (ag gerekmez).
+  #   ntfy     : ucretsiz; ntfy uygulamasindan konuya abone olunur (VARSAYILAN)
+  #   telegram : sadece ortam degiskenleri tanimliysa etkinlesir
+  #   webhook  : sadece adres tanimliysa etkinlesir (Discord/Slack/Zapier/n8n)
+  #   console / file : yerel yedek; dosya cikisi logs/notifications.jsonl
+  providers:
+    - console
+    - file
+    - ntfy
+
+  # ntfy sunucusu. Genel/ucretsiz icin ntfy.sh; kendi sunucunuz icin tam adres
+  # yazabilirsiniz (orn. http://127.0.0.1:8080).
+  ntfy_host: ntfy.sh
+
+  # ntfy konu (topic) adi. Guvenlik icin buraya YAZMAYIN; bunun yerine
+  # CRYPTOBOT_NTFY_TOPIC ortam degiskenini kullanin. Bos/null ise ntfy pasif
+  # kalir ve yalnizca console+file calisir. Konu adini bilen herkes genel
+  # ntfy.sh uzerindeki mesajlari okuyabilir (bkz. NOTIFICATIONS.md guvenlik notu).
+  ntfy_topic: null
+
+  # Bu seviyenin ALTINDAKI bildirimler gonderilmez: info < warning < critical.
+  min_severity: info
+
+  # Ayni bildirim (ayni tur+baslik+govde) bu saniye icinde tekrar uretilirse
+  # bastirilir (spam korumasi). 0 = kapali.
+  dedupe_window_seconds: 300
+
+  # Saatlik AG gonderim siniri: 60 dakikada en fazla bu kadar AG gonderimi
+  # (ntfy/telegram/webhook) yapilir; fazlasi "suppressed / max_per_hour" olarak
+  # kaydedilir. Yerel console/file yansimalari bu butceyi HIC tuketmez.
+  # ONEMLI: critical olaylar (risk_halted, data_fail_safe) bu sinira TAKILMAZ;
+  # her kosulda gonderilir (yine de dedupe uygulanir ve kayda gecer).
+  max_per_hour: 20
+
+  # Sessiz saatler (yerel saat): bu aralikta yalnizca critical bildirimler
+  # gonderilir, info/warning bastirilir. null = kapali. Ornek: "22:00-07:00"
+  quiet_hours: null
+
+  # true ise hicbir sey GONDERILMEZ; yalnizca ne gonderilecegi kaydedilir/gosterilir.
+  dry_run: false
+
+  # Saglayici basina HTTP zaman asimi (saniye) ve sinirli yeniden deneme.
+  # Toplam deneme = 1 + retry_max (ust sinir 10); bekleme 2x artar, tavanli.
+  timeout_seconds: 10.0
+  retry_max: 2
+  backoff_initial_seconds: 1.0
+  backoff_max_seconds: 8.0
+
+  # Global equity uyarisi: zirveden bu yuzde kadar dusus olursa "equity_drop"
+  # bildirimi uretir. 0 = kapali.
+  equity_drop_pct: 3.0
+
+  # Bildirilecek olay turleri. VARSAYILAN ARTIK SADECE ISLEM OLAYLARI:
+  # pozisyon ACILINCA ve KAPANINCA bir bildirim gider, baska hicbir olay
+  # varsayilan olarak gonderilmez. Diger olaylarin hepsi uygulanmis ve
+  # `notify preview --all` ile onizlenebilir kalir; tek satir ekleyerek
+  # geri acilir (ornek: risk_halted, daily_summary). Listeden cikarilan olay
+  # icin kayit "suppressed / event_not_enabled" olarak dusulur (sessizce
+  # kaybolmaz). Ayrintilar: NOTIFICATIONS.md
+  #
+  # NOT: take_profit_hit / stop_loss_hit, position_closed'in ayrinti
+  # varyantlaridir; position_closed acikken tek bir cikis icin ikinci bir
+  # ag mesaji URETMEZLER (bkz. notify/guard.py REASON_SUPERSEDED).
+  notify_on:
+    - position_opened
+    - position_closed

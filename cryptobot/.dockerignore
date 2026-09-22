@@ -1,0 +1,12 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.env
+data/ledger.sqlite
+data/cache/*.corrupt*
+logs/*.log
+logs/*.jsonl
+reports/exports

@@ -1,0 +1,269 @@
+# =============================================================================
+#  cryptobot -- scheduled paper-trading run on free GitHub-hosted runners.
+#
+#  WHY THIS EXISTS
+#    The bot is a local process: if your PC is off, nothing runs and nothing is
+#    sent.  This workflow is the free cloud path -- GitHub runs the bot for you
+#    on a schedule, with no server and no payment method.
+#
+#  WHERE IT LIVES
+#    GitHub ONLY reads workflows from .github/workflows/ at the REPOSITORY ROOT,
+#    so this file must stay at <repo-root>/.github/workflows/paper-trade.yml.
+#    The repository root is the PARENT of the cryptobot/ package: every command
+#    below uses root-relative paths (cryptobot/requirements.txt,
+#    `python -m cryptobot ...`).
+#
+#  WHAT IT DOES (bounded, cold-runner safe)
+#    1. installs the pinned requirements,
+#    2. proves the safety posture (no live-order code path) and runs the offline
+#       unit tests,
+#    3. DOWNLOADS FRESH public candles (Binance's unauthenticated /api/v3/klines)
+#       -- a cold checkout has an empty data/cache, so nothing here may rely on
+#       pre-existing cache,
+#    4. restores the previous ledger/notification state from the Actions cache
+#       (best effort -- absent on the very first run),
+#    5. runs the paper loop for a BOUNDED live window (--duration-seconds /
+#       --interval-seconds): real-time mode, no --offline and no --replay,
+#    6. reconciles the ledger, exports it and writes the daily report,
+#    7. sends phone notifications through ntfy using the topic below,
+#    8. saves the ledger/notification state back to the Actions cache and
+#       uploads reports + ledger as downloadable artifacts,
+#    9. refreshes deploy/heartbeat.txt so GitHub does not pause this schedule
+#       after 60 days without repository activity.
+#
+#  NOTIFICATIONS (optional, never required)
+#    Set ONE of these in the repository:
+#      * Settings -> Secrets and variables -> Actions -> Variables:
+#            CRYPTOBOT_NTFY_TOPIC = <your long random topic>
+#      * or the same name as a Secret (masked in logs).
+#    A repository VARIABLE is preferred: it is easy to rotate and the topic is
+#    not a credential on public ntfy.sh (it is a channel name -- keep it long
+#    and random).  Without it the run still works and notifications stay local
+#    (console + cryptobot/logs/notifications.jsonl).
+#
+#  STATE PERSISTENCE
+#    actions/cache/restore + actions/cache/save carry cryptobot/data/ledger.sqlite
+#    and cryptobot/logs/notifications.jsonl between runs, so the equity history
+#    is continuous instead of resetting on every cold runner.  It is best effort:
+#    the first run restores nothing and a cache eviction only costs history, never
+#    the run itself.  To reset the state, see DEPLOY.md.
+#
+#  CAVEATS (be honest with yourself, see DEPLOY.md and NOTIFICATIONS.md)
+#    * cron granularity is ~5 minutes at best, and GitHub can delay scheduled
+#      workflows (runs may start late; */30 is a floor, not a promise),
+#    * each run is bounded: it is a snapshot, not a 24/7 process,
+#    * scheduled workflows are paused after 60 days without repository activity;
+#      the KEEPALIVE step below mitigates that,
+#    * free minutes/limits apply to private repos (2,000/month); public repos are
+#      unlimited -- see DEPLOY.md for switching between the two.
+# =============================================================================
+name: paper-trade
+
+on:
+  schedule:
+    # Every 30 minutes (GitHub's practical minimum is ~5 minutes).
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      timeframe:
+        description: "Candle timeframe (1m..1d)"
+        default: "1h"
+        required: false
+      duration_seconds:
+        description: "Bounded live window length in seconds"
+        default: "300"
+        required: false
+      interval_seconds:
+        description: "Seconds between paper cycles inside the window"
+        default: "60"
+        required: false
+      days:
+        description: "Days of public history to download first"
+        default: "30"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: paper-trade-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TIMEFRAME: ${{ github.event.inputs.timeframe || '1h' }}
+  DURATION_SECONDS: ${{ github.event.inputs.duration_seconds || '300' }}
+  INTERVAL_SECONDS: ${{ github.event.inputs.interval_seconds || '60' }}
+  DAYS: ${{ github.event.inputs.days || '30' }}
+
+jobs:
+  paper:
+    name: paper run (${{ github.event.inputs.timeframe || '1h' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r cryptobot/requirements.txt
+
+      - name: Safety posture (paper only, no live orders)
+        run: python -m cryptobot safety
+
+      - name: Static scan -- no live-order / signed-request code path
+        run: python cryptobot/tests/no_live_order_scan.py
+
+      - name: Unit tests (offline, no network)
+        run: python -m unittest discover -s cryptobot/tests -t .
+
+      - name: Download fresh public candles (no key needed)
+        # A cold runner has no data/cache, so this MUST run before the paper loop.
+        run: python -m cryptobot download --timeframe "$TIMEFRAME" --days "$DAYS"
+
+      - name: Restore ledger and notification state (best effort)
+        # Must run BEFORE the paper loop so the run appends to the previous
+        # ledger instead of starting from scratch.  A miss is normal (first run,
+        # evicted cache) and is never an error -- restore-keys falls back to the
+        # newest cryptobot-state-* entry.
+        id: state-restore
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cryptobot/data/ledger.sqlite
+            cryptobot/logs/notifications.jsonl
+          key: cryptobot-state-${{ github.run_number }}
+          restore-keys: |
+            cryptobot-state-
+
+      - name: Paper run -- bounded live window
+        # Real-time mode: the loop refreshes the cache from the public endpoint
+        # and stops on its own after DURATION_SECONDS (no --offline, no --replay).
+        # Notification env is scoped to THIS step so the offline unit tests above
+        # always run against a clean environment.
+        env:
+          # Bound the real-time refresh window to the same history length we
+          # downloaded, so a run cannot pull years of 1m candles by accident.
+          CRYPTOBOT_HISTORY_DAYS: ${{ github.event.inputs.days || '30' }}
+          # ntfy topic: repository VARIABLE preferred, Secret accepted as a fallback.
+          CRYPTOBOT_NTFY_TOPIC: ${{ vars.CRYPTOBOT_NTFY_TOPIC || secrets.CRYPTOBOT_NTFY_TOPIC }}
+          # ntfy.sh is the default; set CRYPTOBOT_NTFY_HOST to use a self-hosted
+          # server or a mirror if ntfy.sh is unreachable from your network.
+          CRYPTOBOT_NTFY_HOST: ${{ vars.CRYPTOBOT_NTFY_HOST || 'ntfy.sh' }}
+          CRYPTOBOT_NTFY_TOKEN: ${{ secrets.CRYPTOBOT_NTFY_TOKEN }}
+          CRYPTOBOT_TELEGRAM_BOT_TOKEN: ${{ secrets.CRYPTOBOT_TELEGRAM_BOT_TOKEN }}
+          CRYPTOBOT_TELEGRAM_CHAT_ID: ${{ secrets.CRYPTOBOT_TELEGRAM_CHAT_ID }}
+          CRYPTOBOT_WEBHOOK_URL: ${{ secrets.CRYPTOBOT_WEBHOOK_URL }}
+        run: |
+          python -m cryptobot run \
+            --timeframe "$TIMEFRAME" \
+            --duration-seconds "$DURATION_SECONDS" \
+            --interval-seconds "$INTERVAL_SECONDS" \
+            --run-id "paper-gh-${{ github.run_number }}"
+
+      - name: Notification status and rendered preview (no secrets required)
+        if: always()
+        env:
+          CRYPTOBOT_NTFY_TOPIC: ${{ vars.CRYPTOBOT_NTFY_TOPIC || secrets.CRYPTOBOT_NTFY_TOPIC }}
+          # ntfy.sh is the default; set CRYPTOBOT_NTFY_HOST to use a self-hosted
+          # server or a mirror if ntfy.sh is unreachable from your network.
+          CRYPTOBOT_NTFY_HOST: ${{ vars.CRYPTOBOT_NTFY_HOST || 'ntfy.sh' }}
+        run: |
+          python -m cryptobot notify status || true
+          python -m cryptobot notify preview --event position_opened || true
+          python -m cryptobot notify log --limit 20 || true
+
+      - name: Ledger reconciliation and export
+        if: always()
+        run: |
+          python -m cryptobot verify || true
+          python -m cryptobot export --out cryptobot/reports/exports || true
+          python -m cryptobot report --day latest || true
+
+      - name: Status summary
+        if: always()
+        run: python -m cryptobot status || true
+
+      - name: Save ledger and notification state (best effort)
+        # Runs after the paper loop/exports so it captures THIS run's state, and
+        # before the artifact upload so the cache is the fast path and the
+        # artifacts remain the auditable copy.  Never fails the job: a missing
+        # file or an already-used key is not a run failure.
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            cryptobot/data/ledger.sqlite
+            cryptobot/logs/notifications.jsonl
+          key: cryptobot-state-${{ github.run_number }}
+
+      - name: Upload reports and notification audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cryptobot-reports-${{ github.run_number }}
+          path: |
+            cryptobot/reports/
+            cryptobot/logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload ledger (SQLite)
+        # The Actions cache is the automatic continuity path; this artifact is the
+        # manual, auditable copy -- download it if you want to inspect or restore
+        # the equity history by hand.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cryptobot-ledger-${{ github.run_number }}
+          path: cryptobot/data/ledger.sqlite
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: KEEPALIVE -- refresh deploy/heartbeat.txt
+        # GitHub pauses `schedule` triggers on repositories with 60 days of no
+        # activity.  This step rewrites a tracked heartbeat file roughly every
+        # three weeks and pushes it, so the every-30-minutes cron above keeps
+        # firing while your PC stays off.
+        #
+        # It commits NOTHING else, and it must never fail the job: a rejected
+        # push (fork PR, branch protection, read-only token) is not a run failure.
+        # The age test reads the DATE IN THE FILE, not the file mtime -- after a
+        # fresh checkout every file looks new.
+        if: always()
+        continue-on-error: true
+        run: |
+          set -u
+          FILE="deploy/heartbeat.txt"
+          mkdir -p deploy
+          STALE=1
+          if [ -f "$FILE" ]; then
+            LAST="$(head -c 10 "$FILE" | tr -d '\r\n' || true)"
+            if [ -n "$LAST" ] && PARSED="$(date -u -d "$LAST" +%s 2>/dev/null)"; then
+              AGE_DAYS=$(( ( $(date -u +%s) - PARSED ) / 86400 ))
+              if [ "$AGE_DAYS" -le 20 ]; then
+                STALE=0
+                echo "heartbeat is ${AGE_DAYS} day(s) old; nothing to do"
+              fi
+            fi
+          fi
+          if [ "$STALE" -eq 0 ]; then
+            exit 0
+          fi
+          printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$FILE"
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          # -f: the opt-in root .gitignore excludes everything except the listed
+          # paths, so the heartbeat must be added explicitly.
+          git add -f "$FILE"
+          git commit -m "chore: keepalive"
+          git push

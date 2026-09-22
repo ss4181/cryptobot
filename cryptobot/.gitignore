@@ -1,0 +1,40 @@
+# generated runtime state
+data/cache/*.csv
+data/cache/*.corrupt*
+data/ledger.sqlite
+run/paper_state.json
+run/paper.pid
+run/paper.stop
+# run/ is scratch space: lock probes, side ledgers, ad-hoc state snapshots
+run/panel_lockprobe/
+run/*.pid
+run/*.stop
+run/*.log
+run/*.tmp
+run/*.sqlite
+run/**/*.sqlite
+logs/*.log
+# notification audit trail (runtime artifact; contains alert text)
+logs/*.jsonl
+reports/*.json
+reports/*.md
+reports/*.png
+reports/exports/
+.repro/
+*.tmp
+
+# keep the directories themselves
+!data/cache/.gitkeep
+!reports/.gitkeep
+!logs/.gitkeep
+!run/.gitkeep
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+# evidence/log dumps and generated panel HTML (runtime artifacts)
+reports/*.txt
+reports/panel/
